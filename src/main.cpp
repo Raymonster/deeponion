@@ -77,11 +77,11 @@ CScript COINBASE_FLAGS;
 const string strMessageMagic = "DeepOnion Signed Message:\n";
 
 // Settings
-int64_t nTransactionFee = MIN_TX_FEE;
+int64_t nTransactionFee = GetMinTxFee();
 int64_t nReserveBalance = 0;
 int64_t nMinimumInputValue = 0;
 
-static const int NUM_OF_POW_CHECKPOINT = 20;
+static const int NUM_OF_POW_CHECKPOINT = 22;
 static const int checkpointPoWHeight[NUM_OF_POW_CHECKPOINT][2] =
 {
 		{  9601,  4611},
@@ -104,9 +104,62 @@ static const int checkpointPoWHeight[NUM_OF_POW_CHECKPOINT][2] =
 		{375453, 79257},
 		{400494, 84066},
 		{434205, 90499},
+		{450225, 93657},
+		{468575, 97230},
 };
 
 extern enum Checkpoints::CPMode CheckpointsMode;
+
+int64_t PastDrift(int64_t nTime) 
+{ 
+	// if(pindexBest == NULL)
+		return nTime - 2 * 60 * 60;
+	/*
+	// if((pindexBest->nHeight < SWITCH_BLOCK_HARD_FORK && !fTestNet) || (pindexBest->nHeight < SWITCH_BLOCK_HARD_FORK_TESTNET && fTestNet))
+	if(!fTestNet || (pindexBest->nHeight < SWITCH_BLOCK_HARD_FORK_TESTNET && fTestNet))
+		return nTime - 2 * 60 * 60; 
+ 
+	return nTime - 15;
+	*/
+} 
+
+int64_t FutureDrift(int64_t nTime) 
+{ 
+	// if(pindexBest == NULL)
+		return nTime + 2 * 60 * 60;
+/*
+	// if((pindexBest->nHeight < SWITCH_BLOCK_HARD_FORK && !fTestNet) || (pindexBest->nHeight < SWITCH_BLOCK_HARD_FORK_TESTNET && fTestNet))
+	if(!fTestNet || (pindexBest->nHeight < SWITCH_BLOCK_HARD_FORK_TESTNET && fTestNet))
+		return nTime + 2 * 60 * 60; 
+
+	return nTime + 15;
+	*/
+}
+
+int64_t GetMinTxFee() 
+{
+	if(pindexBest == NULL)
+		return MIN_TX_FEE;
+
+	// if((pindexBest->nHeight < SWITCH_BLOCK_HARD_FORK && !fTestNet) || (pindexBest->nHeight < SWITCH_BLOCK_HARD_FORK_TESTNET && fTestNet))
+	if(!fTestNet || (pindexBest->nHeight < SWITCH_BLOCK_HARD_FORK_TESTNET && fTestNet))
+		return MIN_TX_FEE; 
+
+	return MIN_TX_FEE_NEW;	
+}
+
+int64_t GetMinRelayTxFee() 
+{
+	if(pindexBest == NULL)
+		return MIN_RELAY_TX_FEE;
+
+	// if((pindexBest->nHeight < SWITCH_BLOCK_HARD_FORK && !fTestNet) || (pindexBest->nHeight < SWITCH_BLOCK_HARD_FORK_TESTNET && fTestNet))
+	if(!fTestNet || (pindexBest->nHeight < SWITCH_BLOCK_HARD_FORK_TESTNET && fTestNet))
+		return MIN_RELAY_TX_FEE; 
+ 
+	return MIN_RELAY_TX_FEE_NEW;	
+}
+
 
 //////////////////////////////////////////////////////////////////////////////
 //
@@ -388,7 +441,10 @@ bool CTransaction::ReadFromDisk(COutPoint prevout)
 bool CTransaction::IsStandard() const
 {
     if (nVersion > CTransaction::CURRENT_VERSION)
+    {
+    	printf("CTransaction::IsStandard(): nVersion > CTransaction::CURRENT_VERSION.\n");
         return false;
+    }
 
     BOOST_FOREACH(const CTxIn& txin, vin)
     {
@@ -396,16 +452,32 @@ bool CTransaction::IsStandard() const
         // pay-to-script-hash, which is 3 ~80-byte signatures, 3
         // ~65-byte public keys, plus a few script ops.
         if (txin.scriptSig.size() > 500)
+        {
+        	printf("CTransaction::IsStandard(): txin Script Size > 500.\n");
             return false;
+        }
         if (!txin.scriptSig.IsPushOnly())
+        {
+        	printf("CTransaction::IsStandard(): txin Script Sig is not push only.\n");
             return false;
+        }
     }
+    
+    txnouttype whichType;   
     BOOST_FOREACH(const CTxOut& txout, vout) {
-        if (!::IsStandard(txout.scriptPubKey))
+        if (!::IsStandard(txout.scriptPubKey, whichType))
+        {
+        	printf("CTransaction::IsStandard(): Vout is not standard.\n");
             return false;
-        if (txout.nValue == 0)
-            return false;
+        }
+
+        if (whichType != TX_NULL_DATA && txout.nValue == 0)
+        {
+        	printf("CTransaction::IsStandard(): txout nValue is 0 and tx is of non-null data.\n");
+        	return false;
+        }
     }
+    
     return true;
 }
 
@@ -600,13 +672,13 @@ bool CTransaction::CheckTransaction() const
 
 int64 CTransaction::GetMinFee(unsigned int nBlockSize, enum GetMinFee_mode mode, unsigned int nBytes) const
 {
-    // Base fee is either MIN_TX_FEE or MIN_RELAY_TX_FEE
-    int64 nBaseFee = (mode == GMF_RELAY) ? MIN_RELAY_TX_FEE : MIN_TX_FEE;
+    // Base fee is either Min Tx Fee or Min Relay Tx Fee
+    int64 nBaseFee = (mode == GMF_RELAY) ? GetMinRelayTxFee() : GetMinTxFee();
 
     unsigned int nNewBlockSize = nBlockSize + nBytes;
     int64 nMinFee = (1 + (int64)nBytes / 1000) * nBaseFee;
 
-    // To limit dust spam, require MIN_TX_FEE/MIN_RELAY_TX_FEE if any output is less than 0.01
+    // To limit dust spam, require Min Tx Fee / Min Relay Tx Fee if any output is less than Min Tx Fee
     if (nMinFee < nBaseFee)
     {
         BOOST_FOREACH(const CTxOut& txout, vout)
@@ -650,8 +722,15 @@ bool CTxMemPool::accept(CTxDB& txdb, CTransaction &tx, bool fCheckInputs,
         return error("CTxMemPool::accept() : not accepting nLockTime beyond 2038 yet");
 
     // Rather not work on nonstandard transactions (unless -testnet)
+    
     if (!fTestNet && !tx.IsStandard())
         return error("CTxMemPool::accept() : nonstandard transaction type");
+    
+    if(fTestNet && pindexBest != NULL)
+    {
+    	if(pindexBest->nHeight > SWITCH_BLOCK_HARD_FORK_TESTNET && !tx.IsStandard())
+     		return error("CTxMemPool::accept() : nonstandard transaction type for testnet");
+    }
 
     // Do we already have it?
     uint256 hash = tx.GetHash();
@@ -710,6 +789,12 @@ bool CTxMemPool::accept(CTxDB& txdb, CTransaction &tx, bool fCheckInputs,
         if (!tx.AreInputsStandard(mapInputs) && !fTestNet)
             return error("CTxMemPool::accept() : nonstandard transaction input");
 
+        if(fTestNet && pindexBest != NULL)
+        {
+        	if(pindexBest->nHeight > SWITCH_BLOCK_HARD_FORK_TESTNET && !tx.AreInputsStandard(mapInputs))
+        		return error("CTxMemPool::accept() : nonstandard transaction input for testnet");
+        }
+        
         // Note: if you modify this code to accept non-standard transactions, then
         // you should add code here to check that the transaction does a
         // reasonable number of ECDSA signature verifications.
@@ -720,14 +805,21 @@ bool CTxMemPool::accept(CTxDB& txdb, CTransaction &tx, bool fCheckInputs,
         // Don't accept it if it can't get into a block
         int64 txMinFee = tx.GetMinFee(1000, GMF_RELAY, nSize);
         if (nFees < txMinFee)
+        {
+        	if(pindexBest == NULL)
+        		printf(">>> pindexBest NULL\n");
+        	else
+        		printf(">>> block number = %d\n", pindexBest->nHeight);
+        	
             return error("CTxMemPool::accept() : not enough fees %s, %" PRId64 " < %" PRId64,
                          hash.ToString().c_str(),
                          nFees, txMinFee);
+        }
 
         // Continuously rate-limit free transactions
         // This mitigates 'penny-flooding' -- sending thousands of free transactions just to
         // be annoying or make others' transactions take longer to confirm.
-        if (nFees < MIN_RELAY_TX_FEE)
+        if (nFees < GetMinRelayTxFee())
         {
             static CCriticalSection cs;
             static double dFreeCount;
@@ -2181,6 +2273,7 @@ bool CBlock::CheckBlock(bool fCheckPOW, bool fCheckMerkleRoot, bool fCheckSig) c
 {
     // These are checks that are independent of context
     // that can be verified before saving an orphan block.
+	
     // Size limits
     if (vtx.empty() || vtx.size() > MAX_BLOCK_SIZE || ::GetSerializeSize(*this, SER_NETWORK, PROTOCOL_VERSION) > MAX_BLOCK_SIZE)
         return DoS(100, error("CheckBlock() : size limits failed"));
@@ -2998,8 +3091,9 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
         CAddress addrFrom;
         uint64_t nNonce = 1;
         vRecv >> pfrom->nVersion >> pfrom->nServices >> nTime >> addrMe;
-        if (pfrom->nVersion < MIN_PROTO_VERSION || 
-        		(pfrom->nVersion < MIN_PROTO_VERSION_AFTER_SWITCH && pindexBest->nHeight >= SWITCH_BLOCK_STEALTH_ADDRESS && !fTestNet))
+//         if (pfrom->nVersion < MIN_PROTO_VERSION || 
+//         		(pfrom->nVersion < MIN_PROTO_VERSION_AFTER_SWITCH && pindexBest->nHeight >= SWITCH_BLOCK_HARD_FORK && !fTestNet))
+        if (pfrom->nVersion < MIN_PROTO_VERSION) 
         {
             printf("partner %s using obsolete version %i; disconnecting\n", pfrom->addr.ToString().c_str(), pfrom->nVersion);
             pfrom->fDisconnect = true;
@@ -3028,10 +3122,6 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
             pfrom->fDisconnect = true;
             return true;
         }
-
-        // record my external IP reported by peer
-        if (addrFrom.IsRoutable() && addrMe.IsRoutable())
-            addrSeenByPeer = addrMe;
 
         // Be shy and don't send version until we hear
         if (pfrom->fInbound)

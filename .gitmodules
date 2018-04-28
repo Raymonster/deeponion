@@ -4,4 +4,4 @@
 
 [submodule "tor"]
 	path = tor
-	url = https://github.com/brakmic/tor.git
+	url = https://git.torproject.org/tor.git
